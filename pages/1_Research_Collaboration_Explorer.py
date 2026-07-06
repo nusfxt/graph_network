@@ -659,8 +659,9 @@ try {
           _allNodes[id].font  = {color: _origFont[id]};
         }
       }
+      var keepEStr = keepE.map(String);
       for (var eid in _allEdges){
-        _allEdges[eid].color = (keepE.indexOf(eid) === -1) ? 'rgba(150,150,150,0.05)' : _origEdge[eid];
+        _allEdges[eid].color = (keepEStr.indexOf(String(eid)) === -1) ? 'rgba(150,150,150,0.05)' : _origEdge[eid];
       }
     } else if (_active){
       _active = false;
@@ -673,10 +674,14 @@ try {
     _pushUpdates();
   });
 } catch(e) {}
-// centre the graph in the viewport once the layout settles
+// centre the graph in the viewport (try several triggers to survive version/physics differences)
 try {
-  network.once("stabilizationIterationsDone", function(){ try { network.fit({animation:false}); } catch(e) {} });
-  setTimeout(function(){ try { network.fit({animation:false}); } catch(e) {} }, 500);
+  function _doFit(){ try { network.fit({animation:false}); } catch(e) {} }
+  network.once("stabilizationIterationsDone", _doFit);
+  network.once("stabilized", _doFit);
+  network.on("afterDrawing", function(){ if (!window._pf){ window._pf = true; _doFit(); } });
+  setTimeout(_doFit, 400);
+  setTimeout(_doFit, 1200);
 } catch(e) {}
 """
 
