@@ -674,14 +674,17 @@ try {
     _pushUpdates();
   });
 } catch(e) {}
-// centre the graph in the viewport (try several triggers to survive version/physics differences)
+// centre the graph in the viewport. Re-fit on the first few draws (catches iframe size-settling
+// for the default/visible tab) and on resize, so every tab centres regardless of load order.
 try {
   function _doFit(){ try { network.fit({animation:false}); } catch(e) {} }
+  var _fitCount = 0;
+  network.on("afterDrawing", function(){ if (_fitCount < 6){ _fitCount++; _doFit(); } });
+  network.on("resize", _doFit);
   network.once("stabilizationIterationsDone", _doFit);
   network.once("stabilized", _doFit);
-  network.on("afterDrawing", function(){ if (!window._pf){ window._pf = true; _doFit(); } });
   setTimeout(_doFit, 400);
-  setTimeout(_doFit, 1200);
+  setTimeout(_doFit, 1500);
 } catch(e) {}
 """
 
