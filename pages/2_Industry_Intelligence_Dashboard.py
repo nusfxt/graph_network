@@ -1084,14 +1084,18 @@ with t5:
         pv = (us[us["UNIT"].isin(heatmap_units) & us["SUBJECT"].isin(ts)]
               .pivot_table(index="SUBJECT", columns="UNIT", values="CNT", fill_value=0))
         if not pv.empty:
+            # self-contained light panel so the heatmap reads on BOTH dark and light page themes:
+            # fixed light plot background, opaque light→dark blue scale, dark ticks, white cell gaps.
             fig3 = px.imshow(pv,
-                              color_continuous_scale=[[0,"rgba(0,61,124,0.08)"],[0.4,"#5B9FC8"],[1,NUS_BLUE]],
+                              color_continuous_scale=[[0,"#EAF1FB"],[0.5,"#5B9FC8"],[1,NUS_BLUE]],
                               labels=dict(color="Records"), aspect="auto")
-            fig3.update_layout(margin=dict(t=10,b=10,l=10,r=10),
-                                paper_bgcolor="rgba(0,0,0,0)", height=320,
+            fig3.update_traces(xgap=1.5, ygap=1.5)
+            fig3.update_layout(margin=dict(t=12,b=12,l=12,r=12), height=340,
+                                paper_bgcolor="#F5F7FA", plot_bgcolor="#FFFFFF",
                                 coloraxis_showscale=False,
-                                xaxis=dict(tickfont=dict(size=11)),
-                                yaxis=dict(tickfont=dict(size=11)))
+                                font=dict(color="#3D4F61"),
+                                xaxis=dict(tickfont=dict(size=11, color="#3D4F61"), title=None),
+                                yaxis=dict(tickfont=dict(size=11, color="#3D4F61"), title=None))
             st.plotly_chart(fig3, use_container_width=True)
         insight("Darker cells = higher research output in that unit-subject pair. "
                 "Use this to match the right NUS unit to the right industry partner by topic.")

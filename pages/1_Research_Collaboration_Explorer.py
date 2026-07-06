@@ -366,9 +366,9 @@ def run_recommendation_flat(
     Category weights: Corporation/Government-Nonprofit 1.0, Hospital 0.8, Institute 0.6, Individual excluded.
     """
     field_clause = _field_clause(subject)
-    order_col = "EXI_SCORE" if existing_only else "NEW_SCORE"
-    # existing-only: existing partners with field collaboration; otherwise show all
-    # (new + existing) ranked by potential, flagged by IS_NEW_OPPORTUNITY.
+    # existing-only ("collaborate most") → literal count of joint works in the field;
+    # otherwise ("recommend") → composite potential score over all orgs.
+    order_col = "FCOLLAB" if existing_only else "NEW_SCORE"
     row_filter = ("IS_NEW_OPPORTUNITY = FALSE AND FCOLLAB > 0"
                   if existing_only else "TRUE")
 
@@ -434,7 +434,7 @@ LIMIT {int(top_n)}
 """
     df = run_query(sql)
     if not df.empty:
-        _sc = "EXI_SCORE" if existing_only else "NEW_SCORE"
+        _sc = "FCOLLAB" if existing_only else "NEW_SCORE"
         _mx = df[_sc].max()
         # normalise to 0–100 relative to the strongest match in this result set
         df["MATCH_SCORE"] = ((100 * df[_sc] / _mx).round().astype(int) if _mx else 0)
@@ -494,23 +494,26 @@ def generate_recommendations_flat(recs_df, subject=None, existing_only=False, ti
             tl += f"  Sample publication titles: {'; '.join(pub[:3])}\n"
         focus_pct = int(round(float(r["FOCUS"]) * 100))
         recent_pct = int(round(float(r["RECENT"]) * 100))
-        collab_line = ("" if r["IS_NEW_OPPORTUNITY"]
-                       else f"  Existing NUS collaborations in this field: {int(r['FCOLLAB'])} joint works\n")
+        # existing-partner queries lead with the literal collaboration count (the ranking basis);
+        # recommendations lead with the composite match score.
+        headline = (f"  Joint works with NUS in this field: {int(r['FCOLLAB'])}\n" if existing_only
+                    else f"  Match score: {int(r['MATCH_SCORE'])}/100\n")
         rows.append(
             f"- {org} ({r['ORG_CATEGORY']}) [{tier}]\n"
-            f"  Match score: {int(r['MATCH_SCORE'])}/100\n"
+            f"{headline}"
             f"  Field activity: {int(r['FIELD_CNT'])} patents/publications in this field\n"
             f"  Research focus: {focus_pct}% of their total output is in this field\n"
             f"  Recency: {recent_pct}% of their field work is from the last 3 years\n"
             f"  Academic track record: co-published / co-filed with {int(r['N_INST'])} distinct research institutes\n"
-            f"{collab_line}{tl}"
+            f"{tl}"
         )
     data_str = "\n".join(rows)
     subject_context = f" in {subject}" if subject else ""
-    mode_desc = ("existing industry partners actively collaborating with NUS" if existing_only
-                 else "recommended industry partners for NUS")
+    mode_desc = ("existing industry partners actively collaborating with NUS, ranked by number of joint works in this field"
+                 if existing_only else "recommended industry partners for NUS, ranked by match score")
     signals_extra = ("- Existing collaboration: [describe the current NUS relationship in this field]\n"
                      if existing_only else "")
+    headline_metric = ("[N] joint works with NUS" if existing_only else "Match [score]/100")
 
     prompt = f"""You are a research collaboration advisor at the National University of Singapore (NUS).
 
@@ -536,7 +539,7 @@ Data:
 Format each recommendation exactly as follows (markdown):
 
 ---
-**[Rank]. [Organisation Name]** — [tier label] · Match [score]/100
+**[Rank]. [Organisation Name]** — [tier label] · {headline_metric}
 
 **About:** 1-2 sentences on what the organisation does and their research focus, citing specific titles as evidence.
 
@@ -629,23 +632,51 @@ LIMIT {int(limit)}
 _DIM_JS = """
 try {
   var _allNodes = nodes.get({returnType:"Object"});
-  var _orig = {}; for (var _id in _allNodes){ _orig[_id] = _allNodes[_id].color; }
+  var _allEdges = edges.get({returnType:"Object"});
+  var _orig = {}, _origFont = {}, _origEdge = {};
+  for (var _id in _allNodes){
+    _orig[_id] = _allNodes[_id].color;
+    _origFont[_id] = (_allNodes[_id].font && _allNodes[_id].font.color) ? _allNodes[_id].font.color : '#ffffff';
+  }
+  for (var _eid in _allEdges){ _origEdge[_eid] = _allEdges[_eid].color; }
   var _active = false;
+  function _pushUpdates(){
+    var un=[]; for (var id in _allNodes){ un.push(_allNodes[id]); } nodes.update(un);
+    var ue=[]; for (var eid in _allEdges){ ue.push(_allEdges[eid]); } edges.update(ue);
+  }
   network.on("click", function(params){
     if (params.nodes.length > 0){
       _active = true;
       var sel = params.nodes[0];
       var keep = network.getConnectedNodes(sel); keep.push(sel);
+      var keepE = network.getConnectedEdges(sel);
       for (var id in _allNodes){
-        _allNodes[id].color = (keep.indexOf(id) === -1) ? 'rgba(150,150,150,0.10)' : _orig[id];
+        if (keep.indexOf(id) === -1){
+          _allNodes[id].color = 'rgba(150,150,150,0.10)';
+          _allNodes[id].font  = {color: 'rgba(210,210,210,0.15)'};
+        } else {
+          _allNodes[id].color = _orig[id];
+          _allNodes[id].font  = {color: _origFont[id]};
+        }
+      }
+      for (var eid in _allEdges){
+        _allEdges[eid].color = (keepE.indexOf(eid) === -1) ? 'rgba(150,150,150,0.05)' : _origEdge[eid];
       }
     } else if (_active){
       _active = false;
-      for (var id in _allNodes){ _allNodes[id].color = _orig[id]; }
+      for (var id in _allNodes){
+        _allNodes[id].color = _orig[id];
+        _allNodes[id].font  = {color: _origFont[id]};
+      }
+      for (var eid in _allEdges){ _allEdges[eid].color = _origEdge[eid]; }
     }
-    var upd=[]; for (var id in _allNodes){ upd.push(_allNodes[id]); }
-    nodes.update(upd);
+    _pushUpdates();
   });
+} catch(e) {}
+// centre the graph in the viewport once the layout settles
+try {
+  network.once("stabilizationIterationsDone", function(){ try { network.fit({animation:false}); } catch(e) {} });
+  setTimeout(function(){ try { network.fit({animation:false}); } catch(e) {} }, 500);
 } catch(e) {}
 """
 
@@ -1425,25 +1456,56 @@ with graph_col:
             existing_only = rec_data.get("existing_only", False)
             subject_context = f" in {subject_filter}" if subject_filter else ""
             if existing_only:
-                st.markdown(f"Top industry partners **actively collaborating** with **NUS**{subject_context}, ranked by match score.")
+                st.markdown(f"Top industry partners **actively collaborating** with **NUS**{subject_context}, ranked by number of joint works in this field.")
             else:
                 st.markdown(f"Recommended industry partners for **NUS**{subject_context}, ranked by match score.")
 
             st.subheader("📋 Summary")
+            _focus = (recs_df["FOCUS"] * 100).round().astype(int).astype(str) + "%"
+            _recent = (recs_df["RECENT"] * 100).round().astype(int).astype(str) + "%"
             if existing_only:
-                _c = ["ORG_NAME", "ORG_CATEGORY", "MATCH_SCORE", "FCOLLAB", "FIELD_CNT", "FOCUS", "RECENT", "N_INST"]
-                _n = ["Organisation", "Category", "Match /100", "NUS collabs (field)", "Field IP", "Focus", "Recency", "Academic ties"]
+                # "collaborate most" — lead with the literal joint-works count (the ranking basis)
+                _sdf = pd.DataFrame({
+                    "Organisation": recs_df["ORG_NAME"].values,
+                    "Category": recs_df["ORG_CATEGORY"].values,
+                    "Joint works with NUS": recs_df["FCOLLAB"].values,
+                    "Patents & publications in this field": recs_df["FIELD_CNT"].values,
+                    "Recently active (Past 3 Years)": _recent.values,
+                    "Works with universities": recs_df["N_INST"].values,
+                })
             else:
-                _c = ["ORG_NAME", "ORG_CATEGORY", "MATCH_SCORE", "FIELD_CNT", "FOCUS", "RECENT", "N_INST"]
-                _n = ["Organisation", "Category", "Match /100", "Field IP", "Focus", "Recency", "Academic ties"]
-            _status = recs_df["IS_NEW_OPPORTUNITY"].map(lambda x: "🆕 New" if x else "🤝 Existing")
-            _sdf = recs_df[_c].copy()
-            _sdf.columns = _n
-            _sdf.insert(2, "Opportunity", _status.values)
+                _status = recs_df["IS_NEW_OPPORTUNITY"].map(lambda x: "🆕 New" if x else "🤝 Existing")
+                _sdf = pd.DataFrame({
+                    "Organisation": recs_df["ORG_NAME"].values,
+                    "Category": recs_df["ORG_CATEGORY"].values,
+                    "Opportunity": _status.values,
+                    "Match score": recs_df["MATCH_SCORE"].values,
+                    "Patents & publications in this field": recs_df["FIELD_CNT"].values,
+                    "Focused on this field": _focus.values,
+                    "Recently active (Past 3 Years)": _recent.values,
+                    "Works with universities": recs_df["N_INST"].values,
+                })
             _sdf.index = range(1, len(_sdf) + 1)
             st.caption("Click a row to explore that partner's focus areas, NUS-unit collaborations, and other partners.")
+            _colcfg = {
+                "Match score": st.column_config.NumberColumn(
+                    "Match score", help="Overall fit for this field, 0–100 (100 = best match in this search)."),
+                "Opportunity": st.column_config.TextColumn(
+                    "Opportunity", help="🆕 New = no prior NUS collaboration · 🤝 Existing = already works with NUS."),
+                "Joint works with NUS": st.column_config.NumberColumn(
+                    "Joint works with NUS", help="Patents/publications they've co-produced with NUS in this field."),
+                "Patents & publications in this field": st.column_config.NumberColumn(
+                    "Patents & publications in this field", help="How many of their patents/publications are in this research area."),
+                "Focused on this field": st.column_config.TextColumn(
+                    "Focused on this field", help="Share of their entire portfolio that is in this field — higher = more of a specialist."),
+                "Recently active (Past 3 Years)": st.column_config.TextColumn(
+                    "Recently active (Past 3 Years)", help="How recent their work in this field is — higher = more currently active."),
+                "Works with universities": st.column_config.NumberColumn(
+                    "Works with universities", help="Number of research institutes they've partnered with — a sign they're open to academic collaboration."),
+            }
             _sel = st.dataframe(
-                _sdf, on_select="rerun", selection_mode="single-row", use_container_width=True,
+                _sdf, on_select="rerun", selection_mode="single-row",
+                use_container_width=True, column_config=_colcfg,
             )
 
             _rcol1, _rcol2, _rcol3 = st.columns([1, 1, 4])
