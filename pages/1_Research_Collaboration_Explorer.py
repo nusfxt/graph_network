@@ -1,5 +1,6 @@
 import json
 import re
+import uuid
 from io import BytesIO
 import anthropic
 import pandas as pd
@@ -99,6 +100,39 @@ def run_query(sql: str) -> pd.DataFrame:
 
 def sql_escape(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _log_session_id() -> str:
+    if "log_session_id" not in st.session_state:
+        st.session_state.log_session_id = uuid.uuid4().hex[:12]
+    return st.session_state.log_session_id
+
+
+def log_query(page, user_query, response_type=None, subject_filter=None,
+              existing_only=None, llm_answer=None, result_count=None, result_orgs=None):
+    """Best-effort logging of a query + LLM output to QUERY_LOG. Never raises — a
+    logging failure must not break the user's request."""
+    try:
+        def esc(v):
+            if v is None:
+                return "NULL"
+            if isinstance(v, bool):
+                return "TRUE" if v else "FALSE"
+            if isinstance(v, (int, float)):
+                return str(v)
+            s = str(v).replace("\\", "\\\\").replace("'", "''")
+            return "'" + s + "'"
+        sql = (
+            "INSERT INTO INDUSTRY_AGG.PUBLIC.QUERY_LOG "
+            "(PAGE, USER_QUERY, RESPONSE_TYPE, SUBJECT_FILTER, EXISTING_ONLY, "
+            "LLM_ANSWER, RESULT_COUNT, RESULT_ORGS, SESSION_ID) "
+            f"SELECT {esc(page)}, {esc(user_query)}, {esc(response_type)}, {esc(subject_filter)}, "
+            f"{esc(existing_only)}, {esc(llm_answer)}, {esc(result_count)}, {esc(result_orgs)}, "
+            f"{esc(_log_session_id())}"
+        )
+        session.sql(sql).collect()
+    except Exception:
+        pass
 
 
 def get_node_color(node_type: str, node_name: str, nus_affiliated) -> str:
@@ -1871,6 +1905,7 @@ if submitted and user_input.strip():
                     "content": answer,
                     "filters": None,
                 })
+                log_query("collaborator_finder", user_input, "general_answer", llm_answer=answer)
 
             elif response_type == "recommendation":
                 # --- Recommendation mode (flat model on PAT_PUB + ENTITIES) ---
@@ -1937,6 +1972,13 @@ if submitted and user_input.strip():
                     "content": answer,
                     "filters": None,
                 })
+                log_query(
+                    "collaborator_finder", user_input, "recommendation",
+                    subject_filter=subject_val, existing_only=existing_only, llm_answer=answer,
+                    result_count=(0 if recs_df.empty else len(recs_df)),
+                    result_orgs=(None if recs_df.empty
+                                 else ", ".join(recs_df["ORG_NAME"].head(10).astype(str).tolist())),
+                )
 
             else:
                 # --- Graph query — update filters as normal ---
@@ -1963,6 +2005,8 @@ if submitted and user_input.strip():
                     "content": explanation,
                     "filters": changed if changed else None,
                 })
+                log_query("collaborator_finder", user_input, "graph_query",
+                          subject_filter=changed.get("subject_filter"), llm_answer=explanation)
 
                 run_query.clear()
 

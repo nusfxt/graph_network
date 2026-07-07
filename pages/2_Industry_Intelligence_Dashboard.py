@@ -5,6 +5,7 @@ Singapore Landscape · 2020–2025
 """
 
 import re
+import uuid
 import warnings
 import streamlit as st
 import pandas as pd
@@ -238,6 +239,28 @@ def sql(query: str) -> pd.DataFrame:
     cur.execute(query)
     return cur.fetch_pandas_all()
 
+
+def _log_session_id():
+    if "log_session_id" not in st.session_state:
+        st.session_state.log_session_id = uuid.uuid4().hex[:12]
+    return st.session_state.log_session_id
+
+
+def log_query(page, user_query, response_type=None, llm_answer=None, result_count=None):
+    """Best-effort logging of the NL question + generated SQL to QUERY_LOG. Never raises."""
+    try:
+        conn = get_conn()
+        if conn is None:
+            return
+        conn.cursor().execute(
+            "INSERT INTO INDUSTRY_AGG.PUBLIC.QUERY_LOG "
+            "(PAGE, USER_QUERY, RESPONSE_TYPE, LLM_ANSWER, RESULT_COUNT, SESSION_ID) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (page, user_query, response_type, llm_answer, result_count, _log_session_id()),
+        )
+    except Exception:
+        pass
+
 TBL = (f"{st.secrets['snowflake_intel']['database']}."
        f"{st.secrets['snowflake_intel']['schema']}."
        f"{st.secrets['snowflake_intel']['table']}")
@@ -428,6 +451,9 @@ with st.sidebar:
                     st.session_state["llm_result"] = {
                         "q": q, "sql": gen_sql, "df": df, "error": err
                     }
+                    log_query("dashboard", q, "dashboard_sql",
+                              llm_answer=(err if err else gen_sql),
+                              result_count=(len(df) if df is not None else None))
 
     st.markdown(f"<div style='height:1px;background:#1A4A6E;margin:0.8rem 0'></div>",
                 unsafe_allow_html=True)
