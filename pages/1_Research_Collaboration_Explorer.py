@@ -504,8 +504,8 @@ SELECT ORG_NAME, IP_TYPE, TITLE FROM matched WHERE rn <= 3 ORDER BY ORG_NAME, IP
     return run_query(sql)
 
 
-def generate_recommendations_flat(recs_df, subject=None, existing_only=False, titles_df=None):
-    """Write recommendations from the flat-model results, framed around the new signals."""
+def _build_reco_prompt(recs_df, subject=None, existing_only=False, titles_df=None):
+    """Build the recommendation prompt + max_tokens budget from the flat-model results."""
     titles_by_org = {}
     if titles_df is not None and not titles_df.empty:
         for _, row in titles_df.iterrows():
@@ -586,12 +586,30 @@ Format each recommendation exactly as follows (markdown):
 
 **Strategic note:** One sentence on the specific next step this partner represents.
 """
+    max_tokens = min(8000, 500 + len(recs_df) * 400)
+    return prompt, max_tokens
+
+
+def generate_recommendations_flat(recs_df, subject=None, existing_only=False, titles_df=None):
+    """Write recommendations (non-streaming) — kept for any non-UI callers."""
+    prompt, max_tokens = _build_reco_prompt(recs_df, subject, existing_only, titles_df)
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=min(8000, 500 + len(recs_df) * 400),
+        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.content[0].text.strip()
+
+
+def stream_recommendations_flat(recs_df, subject=None, existing_only=False, titles_df=None):
+    """Stream the write-up token-by-token — yields text chunks for st.write_stream()."""
+    prompt, max_tokens = _build_reco_prompt(recs_df, subject, existing_only, titles_df)
+    with client.messages.stream(
+        model="claude-sonnet-4-5",
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        yield from stream.text_stream
 
 
 def _partner_records_cte(partner: str) -> str:
@@ -1229,6 +1247,29 @@ Rules:
 - Always return ONLY valid JSON. No markdown fences, no extra text."""
 
 
+from pydantic import BaseModel
+from typing import Optional, Literal
+
+
+class RouterOutput(BaseModel):
+    """Structured schema for the chat router — the API guarantees valid JSON in this shape,
+    so no fence-stripping or json.loads fallback is needed."""
+    response_type: Literal["graph_query", "general_answer", "recommendation"]
+    answer: Optional[str] = None
+    query_mode: Optional[str] = None
+    ip_type: Optional[str] = None
+    edge_type: Optional[str] = None
+    search_term: Optional[str] = None
+    category: Optional[str] = None
+    min_weight: Optional[int] = None
+    max_edges: Optional[int] = None
+    top_n_nodes: Optional[int] = None
+    top_n_results: Optional[int] = None
+    subject_filter: Optional[str] = None
+    existing_only: Optional[bool] = None
+    explanation: Optional[str] = None
+
+
 def extract_filters_from_llm(
     user_message: str,
     chat_history: list,
@@ -1253,20 +1294,19 @@ def extract_filters_from_llm(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1024,
+    response = client.messages.parse(
+        model="claude-sonnet-5",
+        max_tokens=1500,
         system=system,
         messages=messages,
+        output_format=RouterOutput,
     )
-
-    raw = response.content[0].text.strip()
-
-    # Strip markdown fences if model adds them anyway
-    raw = re.sub(r"^```(?:json)?", "", raw).strip()
-    raw = re.sub(r"```$", "", raw).strip()
-
-    return json.loads(raw)
+    parsed = response.parsed_output
+    if parsed is None:
+        # Safety net — only hit on a refusal or truncated output. Fall back gracefully.
+        return {"response_type": "general_answer",
+                "answer": "I'm not sure about that. Try rephrasing your question."}
+    return parsed.model_dump()
 
 
 def apply_llm_filters(parsed: dict, current_state: dict, available_ip_types: list, available_edge_types: list, available_categories: list) -> dict:
@@ -1935,12 +1975,14 @@ if submitted and user_input.strip():
                             subject_val,
                         )
 
-                    with st.spinner("Generating recommendations…"):
-                        rec_text = generate_recommendations_flat(
-                            write_up_df,
-                            subject_val,
-                            existing_only,
-                            titles_df=titles_df,
+                    with st.chat_message("assistant"):
+                        rec_text = st.write_stream(
+                            stream_recommendations_flat(
+                                write_up_df,
+                                subject_val,
+                                existing_only,
+                                titles_df=titles_df,
+                            )
                         )
 
                     if len(recs_df) > WRITE_UP_LIMIT:
