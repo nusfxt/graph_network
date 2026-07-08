@@ -1294,19 +1294,28 @@ def extract_filters_from_llm(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    response = client.messages.parse(
-        model="claude-sonnet-5",
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
         max_tokens=1500,
         system=system,
         messages=messages,
-        output_format=RouterOutput,
     )
-    parsed = response.parsed_output
-    if parsed is None:
-        # Safety net — only hit on a refusal or truncated output. Fall back gracefully.
-        return {"response_type": "general_answer",
-                "answer": "I'm not sure about that. Try rephrasing your question."}
-    return parsed.model_dump()
+
+    raw = response.content[0].text.strip()
+
+    # Strip markdown fences if model adds them anyway
+    raw = re.sub(r"^```(?:json)?", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Model replied in prose instead of JSON (conversational follow-ups) —
+        # treat it as a general answer rather than erroring out.
+        return {
+            "response_type": "general_answer",
+            "answer": raw or "I'm not sure about that. Try rephrasing your question.",
+        }
 
 
 def apply_llm_filters(parsed: dict, current_state: dict, available_ip_types: list, available_edge_types: list, available_categories: list) -> dict:
@@ -1975,14 +1984,12 @@ if submitted and user_input.strip():
                             subject_val,
                         )
 
-                    with st.chat_message("assistant"):
-                        rec_text = st.write_stream(
-                            stream_recommendations_flat(
-                                write_up_df,
-                                subject_val,
-                                existing_only,
-                                titles_df=titles_df,
-                            )
+                    with st.spinner("Generating recommendations…"):
+                        rec_text = generate_recommendations_flat(
+                            write_up_df,
+                            subject_val,
+                            existing_only,
+                            titles_df=titles_df,
                         )
 
                     if len(recs_df) > WRITE_UP_LIMIT:
