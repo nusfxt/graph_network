@@ -1247,29 +1247,6 @@ Rules:
 - Always return ONLY valid JSON. No markdown fences, no extra text."""
 
 
-from pydantic import BaseModel
-from typing import Optional, Literal
-
-
-class RouterOutput(BaseModel):
-    """Structured schema for the chat router — the API guarantees valid JSON in this shape,
-    so no fence-stripping or json.loads fallback is needed."""
-    response_type: Literal["graph_query", "general_answer", "recommendation"]
-    answer: Optional[str] = None
-    query_mode: Optional[str] = None
-    ip_type: Optional[str] = None
-    edge_type: Optional[str] = None
-    search_term: Optional[str] = None
-    category: Optional[str] = None
-    min_weight: Optional[int] = None
-    max_edges: Optional[int] = None
-    top_n_nodes: Optional[int] = None
-    top_n_results: Optional[int] = None
-    subject_filter: Optional[str] = None
-    existing_only: Optional[bool] = None
-    explanation: Optional[str] = None
-
-
 def extract_filters_from_llm(
     user_message: str,
     chat_history: list,
@@ -1984,12 +1961,14 @@ if submitted and user_input.strip():
                             subject_val,
                         )
 
-                    with st.spinner("Generating recommendations…"):
-                        rec_text = generate_recommendations_flat(
-                            write_up_df,
-                            subject_val,
-                            existing_only,
-                            titles_df=titles_df,
+                    with st.chat_message("assistant"):
+                        rec_text = st.write_stream(
+                            stream_recommendations_flat(
+                                write_up_df,
+                                subject_val,
+                                existing_only,
+                                titles_df=titles_df,
+                            )
                         )
 
                     if len(recs_df) > WRITE_UP_LIMIT:
