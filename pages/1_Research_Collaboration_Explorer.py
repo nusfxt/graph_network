@@ -1961,16 +1961,29 @@ if submitted and user_input.strip():
                             subject_val,
                         )
 
-                    with chat_container:
-                        with st.chat_message("assistant"):
-                            rec_text = st.write_stream(
-                                stream_recommendations_flat(
-                                    write_up_df,
-                                    subject_val,
-                                    existing_only,
-                                    titles_df=titles_df,
+                    try:
+                        with chat_container:
+                            with st.chat_message("assistant"):
+                                rec_text = st.write_stream(
+                                    stream_recommendations_flat(
+                                        write_up_df,
+                                        subject_val,
+                                        existing_only,
+                                        titles_df=titles_df,
+                                    )
                                 )
-                            )
+                    except Exception:
+                        # Stream dropped (e.g. Streamlit Cloud connection limit) — fall back to
+                        # one non-streaming call so a full report always appears.
+                        rec_text = generate_recommendations_flat(
+                            write_up_df,
+                            subject_val,
+                            existing_only,
+                            titles_df=titles_df,
+                        )
+                        with chat_container:
+                            with st.chat_message("assistant"):
+                                st.write(rec_text)
 
                     if len(recs_df) > WRITE_UP_LIMIT:
                         note = (
