@@ -82,6 +82,7 @@ def create_session():
         "warehouse": st.secrets["snowflake"]["warehouse"],
         "database": st.secrets["snowflake"]["database"],
         "schema": st.secrets["snowflake"]["schema"],
+        "client_session_keep_alive": True,  # heartbeat so the token doesn't expire on a long-running app
     }
     return Session.builder.configs(connection_parameters).create()
 
@@ -95,7 +96,14 @@ client = anthropic.Anthropic(api_key=st.secrets["anthropic"]["api_key"])
 # -----------------------------
 @st.cache_data(ttl=3600)
 def run_query(sql: str) -> pd.DataFrame:
-    return session.sql(sql).to_pandas()
+    global session
+    try:
+        return session.sql(sql).to_pandas()
+    except Exception:
+        # Snowpark session token expired on a long-running app — rebuild the session and retry once.
+        create_session.clear()
+        session = create_session()
+        return session.sql(sql).to_pandas()
 
 
 def sql_escape(value: str) -> str:
@@ -586,7 +594,20 @@ Format each recommendation exactly as follows (markdown):
 
 **Strategic note:** One sentence on the specific next step this partner represents.
 """
-    max_tokens = min(8000, 500 + len(recs_df) * 400)
+    n = len(recs_df)
+    compact = n > 10  # more partners -> shorter write-ups each, so we can cover more
+    if compact:
+        prompt += (
+            f"\n\nLENGTH OVERRIDE — there are {n} partners, so DO NOT use the multi-section layout above. "
+            "Instead write each entry as a single header line followed by 2-3 sentences and NO bullet points:\n"
+            f"---\n**[Rank]. [Organisation Name]** — [tier label] · {headline_metric}\n"
+            "[2-3 sentences: what they work on (cite one sample title if useful), their field activity / focus / "
+            "recency, and why they're worth pursuing. For a New Opportunity, frame it as untapped potential with "
+            "no existing joint work.]\n"
+            "Keep every entry to this short form — the goal is broad coverage, not depth."
+        )
+    per_result = 210 if compact else 400   # compact write-ups are ~half the length
+    max_tokens = min(12000 if compact else 8000, 500 + n * per_result)
     return prompt, max_tokens
 
 
@@ -1935,7 +1956,7 @@ if submitted and user_input.strip():
 
             elif response_type == "recommendation":
                 # --- Recommendation mode (flat model on PAT_PUB + ENTITIES) ---
-                WRITE_UP_LIMIT = 10  # max orgs with detailed AI write-ups
+                WRITE_UP_LIMIT = 25  # max orgs with AI write-ups (detailed for <=10, compact above)
                 subject_val = parsed.get("subject_filter")
                 existing_only = bool(parsed.get("existing_only", False))
                 # existing_only queries expect more results by default (show the landscape)
