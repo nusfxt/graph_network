@@ -1001,11 +1001,16 @@ with t4:
 
     with r2:
         section("NUS share of all Singapore patents — by domain")
+        _gdim = st.radio(
+            "View by", ["Broad area", "Detailed subject"],
+            horizontal=True, key="patshare_dim", label_visibility="collapsed",
+        )
+        _gcol = "QS_SUBJECT_AREA" if _gdim == "Broad area" else "QS_SUBJECT"
         gap = sql(f"""
             SELECT TRIM(f.VALUE::STRING) AS SUBJECT,
                    SUM(CASE WHEN NUS_IP=TRUE  THEN 1 ELSE 0 END) AS NUS_N,
                    SUM(CASE WHEN NUS_IP=FALSE THEN 1 ELSE 0 END) AS EXT_N
-            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(QS_SUBJECT,'|')) f
+            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT({_gcol},'|')) f
             WHERE IP_TYPE='Patents'
               AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
               AND TRIM(f.VALUE::STRING)<>''
@@ -1032,12 +1037,9 @@ with t4:
                 f"<span style='color:{GREEN};font-weight:700;font-size:14px'>■ &gt;7% Strength</span>",
                 unsafe_allow_html=True,
             )
-
-    section("What this tells us — patent decline")
-    alert("NUS patent filings have declined sharply while publications grew — "
-          "a critical commercialisation pipeline failure. CS & Information Systems "
-          "is the only domain with growing patent output. Immediate TTO capacity "
-          "investment is recommended, particularly in Data Science and CS.")
+            _gdrill = ("Switch to *Detailed subject* to drill into granular subjects. " if _gdim == "Broad area"
+                       else "Showing granular subjects — switch back to *Broad area* for the overview. ")
+            st.caption(f"📊 {_gdrill}Domains with 50 or fewer external Singapore patents are excluded.")
 
     pd_df = sql(f"""
         SELECT APPLICATION_PUBLICATION_YEAR AS YEAR,
@@ -1049,11 +1051,41 @@ with t4:
         GROUP BY 1,2 ORDER BY 1
     """)
 
+    section("What this tells us — patent decline")
+    if not pd_df.empty:
+        # which domains actually grew in patent output, early vs late half of the
+        # selected range — computed live so the claim can't drift from the data
+        _pmid = (yr_min+yr_max)//2
+        _pey  = max(1,_pmid-yr_min+1); _ply = max(1,yr_max-_pmid)
+        _pe   = pd_df[pd_df["YEAR"]<=_pmid].groupby("SUBJECT")["CNT"].sum()
+        _pl   = pd_df[pd_df["YEAR"]> _pmid].groupby("SUBJECT")["CNT"].sum()
+        _pgr  = pd.DataFrame({"E":_pe,"L":_pl}).fillna(0)
+        _pgr["DELTA"] = _pgr["L"]/_ply - _pgr["E"]/_pey
+        _growing = _pgr[_pgr["DELTA"]>0].sort_values("DELTA",ascending=False).index.tolist()
+        if not _growing:
+            _grow_txt = "No domain is growing in patent output"
+        elif len(_growing) == 1:
+            _grow_txt = f"{_growing[0].title()} is the only domain with growing patent output"
+        else:
+            _grow_txt = (f"{', '.join(g.title() for g in _growing[:-1])} and {_growing[-1].title()} "
+                         f"are the only domains with growing patent output")
+        alert(f"NUS patent filings have declined sharply while publications grew — "
+              f"a critical commercialisation pipeline failure. {_grow_txt}. Immediate TTO capacity "
+              f"investment is recommended, particularly in Data Science and CS.")
+
     pa, pb = st.columns([1,1.6])
     with pa:
         section("Total NUS patents filed per year")
         if not pd_df.empty:
-            tot = pd_df.groupby("YEAR")["CNT"].sum().reset_index()
+            # count patents directly (NOT the subject-flattened pd_df, which multi-counts
+            # patents tagged with several subjects) so this matches the bar chart in Tab 1
+            tot = sql(f"""
+                SELECT APPLICATION_PUBLICATION_YEAR AS YEAR, COUNT(*) AS CNT
+                FROM {TBL}
+                WHERE NUS_IP=TRUE AND IP_TYPE='Patents'
+                  AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
+                GROUP BY 1 ORDER BY 1
+            """)
             fig3 = px.line(tot, x="YEAR", y="CNT", markers=True,
                            color_discrete_sequence=[RED],
                            labels={"CNT":"NUS Patents Filed","YEAR":"Year"})
@@ -1072,6 +1104,8 @@ with t4:
             fig4.update_layout(xaxis=dict(tickmode="linear",dtick=1),
                                 legend=dict(font=dict(size=12)))
             st.plotly_chart(clean_fig(fig4,300), use_container_width=True)
+            st.caption("📊 A patent can span multiple domains, so yearly bar totals here can exceed "
+                       "the patent count in the line chart on the left.")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
