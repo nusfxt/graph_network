@@ -234,10 +234,16 @@ def get_conn():
 
 @st.cache_data(ttl=3600, show_spinner="Loading data…")
 def sql(query: str) -> pd.DataFrame:
-    conn = get_conn()
-    cur  = conn.cursor()
-    cur.execute(query)
-    return cur.fetch_pandas_all()
+    try:
+        cur = get_conn().cursor()
+        cur.execute(query)
+        return cur.fetch_pandas_all()
+    except Exception:
+        # Session token expired on a long-running app — rebuild the connection and retry once.
+        get_conn.clear()
+        cur = get_conn().cursor()
+        cur.execute(query)
+        return cur.fetch_pandas_all()
 
 
 def _log_session_id():
