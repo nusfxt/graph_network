@@ -132,9 +132,10 @@ def log_query(page, user_query, response_type=None, subject_filter=None,
             return "'" + s + "'"
         sql = (
             "INSERT INTO INDUSTRY_AGG.PUBLIC.QUERY_LOG "
-            "(PAGE, USER_QUERY, RESPONSE_TYPE, SUBJECT_FILTER, EXISTING_ONLY, "
+            "(LOG_TS, PAGE, USER_QUERY, RESPONSE_TYPE, SUBJECT_FILTER, EXISTING_ONLY, "
             "LLM_ANSWER, RESULT_COUNT, RESULT_ORGS, SESSION_ID) "
-            f"SELECT {esc(page)}, {esc(user_query)}, {esc(response_type)}, {esc(subject_filter)}, "
+            "SELECT CONVERT_TIMEZONE('Asia/Singapore', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ, "
+            f"{esc(page)}, {esc(user_query)}, {esc(response_type)}, {esc(subject_filter)}, "
             f"{esc(existing_only)}, {esc(llm_answer)}, {esc(result_count)}, {esc(result_orgs)}, "
             f"{esc(_log_session_id())}"
         )
