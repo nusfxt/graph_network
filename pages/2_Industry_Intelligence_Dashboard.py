@@ -260,8 +260,9 @@ def log_query(page, user_query, response_type=None, llm_answer=None, result_coun
             return
         conn.cursor().execute(
             "INSERT INTO INDUSTRY_AGG.PUBLIC.QUERY_LOG "
-            "(PAGE, USER_QUERY, RESPONSE_TYPE, LLM_ANSWER, RESULT_COUNT, SESSION_ID) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
+            "(LOG_TS, PAGE, USER_QUERY, RESPONSE_TYPE, LLM_ANSWER, RESULT_COUNT, SESSION_ID) "
+            "VALUES (CONVERT_TIMEZONE('Asia/Singapore', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ, "
+            "%s, %s, %s, %s, %s, %s)",
             (page, user_query, response_type, llm_answer, result_count, _log_session_id()),
         )
     except Exception:
@@ -326,8 +327,8 @@ COLUMNS:
 - IP_TYPE                      VARCHAR  'Publications' or 'Patents'
 - APPLICATION_PUBLICATION_YEAR NUMBER   year 2020–2025
 - NUS_IP                       BOOLEAN  TRUE = NUS-owned/affiliated
-- QS_SUBJECT_AREA              VARCHAR  broad QS faculty area — PREFERRED subject dimension. 5 values: ENGINEERING & TECHNOLOGY, NATURAL SCIENCES, LIFE SCIENCES & MEDICINE, SOCIAL SCIENCES & MANAGEMENT, ARTS & HUMANITIES. Multiple values '|' separated (both IP types). Placeholder '-' means unmapped — exclude it.
-- QS_SUBJECT                   VARCHAR  granular subject (e.g. 'DATA SCIENCE'); pipe '|' separated (both IP types). Use only when a specific granular subject is requested.
+- QS_SUBJECT_AREA              VARCHAR  broad QS faculty area — use ONLY for broad faculty-area questions. 5 values: ENGINEERING & TECHNOLOGY, NATURAL SCIENCES, LIFE SCIENCES & MEDICINE, SOCIAL SCIENCES & MANAGEMENT, ARTS & HUMANITIES. Multiple values '|' separated (both IP types). Placeholder '-' means unmapped — exclude it.
+- QS_SUBJECT                   VARCHAR  granular subject (e.g. 'DATA SCIENCE', 'MEDICINE', 'ARTIFICIAL INTELLIGENCE'); pipe '|' separated (both IP types). Use whenever the question names specific subjects (see rule 8).
 - NORMALIZED_NAMES_CONCAT      VARCHAR  institution names separated by '|'
 - N_CORPORATE                  NUMBER   count of corporate co-authors/co-inventors
 - N_INSTITUTE                  NUMBER   count of institute collaborators
@@ -360,6 +361,7 @@ RULES:
 7. LATERAL FLATTEN must appear directly in the top-level FROM clause — NEVER inside a subquery, CTE, or derived table. Write:
    SELECT ... FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(col, 'sep')) f WHERE ...
    NOT: SELECT ... FROM (SELECT ... FROM {TBL}, LATERAL FLATTEN(...) f) sub
+8. COMPARING NAMED SUBJECTS: when the question compares specific subjects (e.g. "data science vs medicine", "AI and biology"), map EVERY named subject to QS_SUBJECT (the granular column) — never QS_SUBJECT_AREA, and never mix the two. Match each with CONTAINS(UPPER(TRIM(f.VALUE::STRING)),'<SUBJECT>') and GROUP BY the subject so you return one series per named subject, regardless of the order they appear in the question. Only fall back to QS_SUBJECT_AREA when the question is explicitly about the broad faculty areas.
 """
 
 def run_llm_query(question: str, api_key: str):
@@ -634,7 +636,7 @@ with t1:
         f"Three signals require immediate management attention: "
         f"<strong>(1)</strong> Applied Materials and Singapore Health Services are NUS's deepest patent "
         f"co-inventors — formalise joint IP roadmaps with them now. "
-        f"<strong>(2)</strong> Data Science is the only external patent domain growing (+32%), "
+        f"<strong>(2)</strong> External Data Science patents are growing rapidly (nearly doubling over the period), "
         f"signalling where industry funding will flow in the next 12–24 months — "
         f"NUS publication growth in this domain (+53%) creates a rare alignment opportunity. "
         f"<strong>(3)</strong> NUS patent output has fallen {abs(pat_chg)}% over the period "
@@ -787,15 +789,69 @@ with t2:
 # TAB 3 — FUNDING ALIGNMENT
 # ════════════════════════════════════════════════════════════════════════════════
 with t3:
+    # ── spotlight stats — computed live so they never drift after data reloads ──
+    _mid = (yr_min + yr_max) // 2
+    _ey  = max(1, _mid - yr_min + 1); _ly = max(1, yr_max - _mid)
+    _ds = sql(f"""
+        SELECT SUM(IFF(NOT NUS_IP,1,0)) AS EXT, SUM(IFF(NUS_IP,1,0)) AS NUS,
+               SUM(IFF(NOT NUS_IP AND APPLICATION_PUBLICATION_YEAR<={_mid},1,0)) AS EXT_E,
+               SUM(IFF(NOT NUS_IP AND APPLICATION_PUBLICATION_YEAR> {_mid},1,0)) AS EXT_L
+        FROM {TBL}
+        WHERE IP_TYPE='Patents' AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
+          AND CONTAINS(UPPER(QS_SUBJECT),'DATA SCIENCE')
+    """)
+    _pub = sql(f"""
+        SELECT SUM(IFF(APPLICATION_PUBLICATION_YEAR<={_mid},1,0)) AS E,
+               SUM(IFF(APPLICATION_PUBLICATION_YEAR> {_mid},1,0)) AS L
+        FROM {TBL}
+        WHERE IP_TYPE='Publications' AND NUS_IP
+          AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
+          AND CONTAINS(UPPER(QS_SUBJECT),'DATA SCIENCE')
+    """)
+    _unt = sql(f"""
+        WITH cs_ext AS (
+            SELECT TRIM(f.VALUE::STRING) AS ORG, COUNT(DISTINCT UID) AS N
+            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(NORMALIZED_NAMES_CONCAT,'|')) f
+            WHERE IP_TYPE='Patents' AND NOT NUS_IP
+              AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
+              AND (CONTAINS(UPPER(QS_SUBJECT),'DATA SCIENCE') OR CONTAINS(UPPER(QS_SUBJECT),'COMPUTER SCIENCE'))
+              AND TRIM(f.VALUE::STRING)<>''
+              AND NOT CONTAINS(UPPER(TRIM(f.VALUE::STRING)),'NATIONAL UNIVERSITY')
+            GROUP BY 1 HAVING COUNT(DISTINCT UID) >= 50
+        ),
+        nus_partners AS (
+            SELECT DISTINCT TRIM(f.VALUE::STRING) AS ORG
+            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(NORMALIZED_NAMES_CONCAT,'|')) f
+            WHERE NUS_IP AND IP_TYPE='Patents' AND TRIM(f.VALUE::STRING)<>''
+        )
+        SELECT ORG, N FROM cs_ext WHERE ORG NOT IN (SELECT ORG FROM nus_partners) ORDER BY N DESC
+    """)
+
+    _r = _ds.iloc[0]; _p = _pub.iloc[0]
+    ext_pat = int(_r["EXT"] or 0); nus_pat = int(_r["NUS"] or 0)
+    gap_pct = (100 * ext_pat / (ext_pat + nus_pat)) if (ext_pat + nus_pat) else 0
+    ext_g   = (((_r["EXT_L"]/_ly) - (_r["EXT_E"]/_ey)) / (_r["EXT_E"]/_ey) * 100) if _r["EXT_E"] else 0
+    pub_g   = (((_p["L"]/_ly) - (_p["E"]/_ey)) / (_p["E"]/_ey) * 100) if _p["E"] else 0
+
+    def _clean_org(s):
+        s = str(s).title()
+        for suf in (" Private Limited", " Pte Ltd", " Pte. Ltd.", " Co Limited", " Limited",
+                    " Singapore", " Asia", " Holding", " Corporation", " Group"):
+            s = s.replace(suf, "")
+        return s.strip()
+    unt_n = len(_unt)
+    unt_names = ", ".join(_clean_org(o) for o in _unt["ORG"].head(3)) if unt_n else ""
+
     sp1, sp2, sp3, sp4 = st.columns(4)
     for col, num, lbl, body in [
-        (sp1, "+31.7%", "Data Science patents growing",
-         "The only domain with rising external filings — everything else is declining"),
-        (sp2, "949", "External DS patents filed",
-         "vs just 5 NUS DS patents — a 99.5% gap in the market's most active growth area"),
-        (sp3, "10", "Untapped CS/AI partners",
-         "Top filers (Lenovo, MediaTek, Grab, Huawei…) have zero current NUS patent deal"),
-        (sp4, "53%", "NUS DS publication growth",
+        (sp1, f"{ext_g:+.0f}%", "External DS patents growing",
+         "Rising external DS patent filings — the market's most active growth area"),
+        (sp2, f"{ext_pat:,}", "External DS patents filed",
+         f"vs just {nus_pat} NUS DS patents — a {gap_pct:.1f}% gap in the market's most active growth area"),
+        (sp3, f"{unt_n:,}", "Untapped CS/AI filers",
+         (f"Major filers with 50+ patents ({unt_names}…) and zero current NUS patent deal" if unt_names
+          else "External CS/AI filers with 50+ patents and zero current NUS patent deal")),
+        (sp4, f"{pub_g:+.0f}%", "NUS DS publication growth",
          "NUS is building capacity fast — but not converting it to patents or partnerships"),
     ]:
         col.markdown(
@@ -886,28 +942,35 @@ with t4:
     r1, r2 = st.columns(2)
     with r1:
         section("What this tells us — capacity build")
-        insight("Data Science (+53%) and CS & Info Systems (+43%) are NUS's "
-                "fastest-growing publication domains — precisely where industry "
-                "patent demand is also growing. This alignment makes a compelling "
-                "case for priority investment and targeted IP conversion.")
+        insight("By volume, Computer Science & Information Systems and Data Science add the most "
+                "new publications each year (switch the chart below to *Detailed subject* to see this) "
+                "— and they're precisely where industry patent demand is also rising. That alignment of "
+                "research momentum with market demand makes a compelling case for priority investment "
+                "and targeted IP conversion.")
     with r2:
         section("What this tells us — capacity gap")
         insight("CS and Data Science have the biggest gap between external demand and "
-                "NUS IP presence (under 2% share). These are the domains where NUS "
-                "research is growing fastest — closing this IP gap is the highest-ROI "
-                "action available to the TTO right now.")
+                "NUS IP presence (under 2% share) — high-volume, fast-growing research areas "
+                "with almost no NUS patents. Closing this IP gap is the highest-ROI action "
+                "available to the TTO right now.")
 
     # ── Row 2 — charts (matched height) ──
     r1, r2 = st.columns(2)
     with r1:
         section("NUS publication growth by domain")
+        _dim = st.radio(
+            "View by", ["Broad area", "Detailed subject"],
+            horizontal=True, key="pubgrowth_dim", label_visibility="collapsed",
+        )
+        _area_view = _dim == "Broad area"
+        _col = "QS_SUBJECT_AREA" if _area_view else "QS_SUBJECT"
         pub_s = sql(f"""
             SELECT APPLICATION_PUBLICATION_YEAR AS YEAR,
                    TRIM(f.VALUE::STRING) AS SUBJECT, COUNT(*) AS CNT
-            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(QS_SUBJECT,'|')) f
+            FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT({_col},'|')) f
             WHERE NUS_IP=TRUE AND IP_TYPE='Publications'
               AND APPLICATION_PUBLICATION_YEAR BETWEEN {yr_min} AND {yr_max}
-              AND TRIM(f.VALUE::STRING)<>''
+              AND TRIM(f.VALUE::STRING) NOT IN ('','-')
             GROUP BY 1,2 ORDER BY 1
         """)
         if not pub_s.empty:
@@ -915,22 +978,24 @@ with t4:
             ey   = max(1,mid-yr_min+1); ly = max(1,yr_max-mid)
             e    = pub_s[pub_s["YEAR"]<=mid].groupby("SUBJECT")["CNT"].sum()
             l    = pub_s[pub_s["YEAR"]> mid].groupby("SUBJECT")["CNT"].sum()
-            pg   = pd.DataFrame({"E":e,"L":l}).dropna()
-            pg   = pg[pg["E"]>100]
-            pg["PCT"] = ((pg["L"]/ly-pg["E"]/ey)/(pg["E"]/ey)*100).round(1)
-            pg   = pg.sort_values("PCT",ascending=False).head(12).reset_index()
-            fig  = px.bar(pg, x="PCT", y="SUBJECT", orientation="h",
-                          color="PCT",
+            pg   = pd.DataFrame({"E":e,"L":l}).fillna(0)
+            # absolute growth: additional publications per year (late average vs early average)
+            pg["DELTA"] = (pg["L"]/ly - pg["E"]/ey).round().astype(int)
+            pg   = pg.sort_values("DELTA",ascending=False).head(5 if _area_view else 15).reset_index()
+            fig  = px.bar(pg, x="DELTA", y="SUBJECT", orientation="h",
+                          color="DELTA",
                           color_continuous_scale=[[0,NUS_BLUE],[0.5,NUS_LBLUE],[1,NUS_ORANGE]],
-                          labels={"PCT":"Growth %","SUBJECT":""})
+                          labels={"DELTA":"Publications added / yr","SUBJECT":""})
             fig.update_layout(coloraxis_showscale=False,
                                yaxis=dict(autorange="reversed"))
             st.plotly_chart(clean_fig(fig,440), use_container_width=True)
             _early = f"{yr_min}" if yr_min == mid else f"{yr_min}–{mid}"
             _late = f"{mid+1}" if mid + 1 == yr_max else f"{mid+1}–{yr_max}"
+            _drill = ("Switch to *Detailed subject* to drill into granular subjects. " if _area_view
+                      else "Showing granular subjects — switch back to *Broad area* for the overview. ")
             st.caption(
-                f"📊 Growth compares the **average annual** publications in **{_late}** against **{_early}** "
-                f"— the later vs earlier half of the selected {yr_min}–{yr_max} range. "
+                f"📊 Absolute growth — additional publications per year in **{_late}** vs **{_early}** "
+                f"(later vs earlier half of {yr_min}–{yr_max}). {_drill}"
                 f"Adjust the year filter to change the comparison."
             )
 
