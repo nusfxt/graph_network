@@ -1,0 +1,61 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # Every 6 hours (UTC) — comfortably under Streamlit Community Cloud's
+    # 12-hour no-traffic sleep threshold.
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Visit app and wake it if asleep
+        run: |
+          python - <<'PYEOF'
+          from playwright.sync_api import sync_playwright
+
+          APP_URL = "https://industry-collab.streamlit.app/"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              print(f"Visiting {APP_URL} ...")
+              page.goto(APP_URL, timeout=60000)
+              page.wait_for_timeout(5000)
+
+              # If the app is asleep, Streamlit shows a "wake up" button.
+              # Try a few likely labels; ignore if none are found (app was
+              # already awake).
+              woke_up = False
+              for label in ["get this app back up", "wake", "yes, get this app back up!"]:
+                  try:
+                      btn = page.get_by_role("button", name=label, exact=False)
+                      if btn.is_visible(timeout=3000):
+                          print(f"Found wake-up button ({label!r}) — clicking.")
+                          btn.click()
+                          woke_up = True
+                          break
+                  except Exception:
+                      continue
+
+              if woke_up:
+                  # Rebooting a slept app can take up to ~1-2 minutes.
+                  page.wait_for_timeout(90000)
+              else:
+                  print("No wake-up button found — app was likely already awake.")
+
+              browser.close()
+              print("Done.")
+          PYEOF
