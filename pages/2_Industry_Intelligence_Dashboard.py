@@ -362,6 +362,13 @@ RULES:
    SELECT ... FROM {TBL}, LATERAL FLATTEN(INPUT=>SPLIT(col, 'sep')) f WHERE ...
    NOT: SELECT ... FROM (SELECT ... FROM {TBL}, LATERAL FLATTEN(...) f) sub
 8. COMPARING NAMED SUBJECTS: when the question compares specific subjects (e.g. "data science vs medicine", "AI and biology"), map EVERY named subject to QS_SUBJECT (the granular column) — never QS_SUBJECT_AREA, and never mix the two. Match each with CONTAINS(UPPER(TRIM(f.VALUE::STRING)),'<SUBJECT>') and GROUP BY the subject so you return one series per named subject, regardless of the order they appear in the question. Only fall back to QS_SUBJECT_AREA when the question is explicitly about the broad faculty areas.
+9. FILTERING BY TOPIC WHILE GROUPING BY PERSON: when a question asks about PIs/authors/researchers IN a subject or topic (e.g. "which NUS PIs are top computer scientists", "PIs ranked high in climate research"), use TWO separate LATERAL FLATTENs in the same top-level FROM — one on AUTHORS (to extract/group by the person) and one on QS_SUBJECT or QS_SUBJECT_AREA (to filter by the topic). NEVER apply a subject/topic CONTAINS filter to the flattened AUTHORS value — a person's name will never match a subject keyword, so that always returns zero rows. Because two FLATTENs in one FROM produce a cross join, always use COUNT(DISTINCT UID) rather than COUNT(*) so a record with multiple matching subject tags isn't counted more than once. Example:
+   SELECT TRIM(a.VALUE::STRING) AS PI_NAME, COUNT(DISTINCT UID) AS PUBLICATION_COUNT
+   FROM {TBL},
+        LATERAL FLATTEN(INPUT=>SPLIT(AUTHORS,'|')) a,
+        LATERAL FLATTEN(INPUT=>SPLIT(QS_SUBJECT,'|')) s
+   WHERE NUS_IP = TRUE AND CONTAINS(UPPER(TRIM(s.VALUE::STRING)),'COMPUTER SCIENCE')
+   GROUP BY 1 ORDER BY 2 DESC LIMIT 200;
 """
 
 def run_llm_query(question: str, api_key: str):
@@ -488,7 +495,8 @@ st.markdown(
     "🇸🇬 <strong>Singapore Landscape Only</strong> — "
     "All records represent patents filed and publications authored within the Singapore "
     "research ecosystem, 2020–2025. Includes NUS, partner universities, hospitals, "
-    "government agencies, and industry."
+    "government agencies, and industry. Covers patents &amp; publications only — grants and "
+    "individual researcher/PI-level data are not available in this dataset."
     "</div>",
     unsafe_allow_html=True,
 )

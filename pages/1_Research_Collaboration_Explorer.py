@@ -57,6 +57,17 @@ with c2:
 st.title("🧲 Potential Collaborator Finder")
 st.write("Discover institutions and corporations with shared research interests for potential collaboration.")
 
+st.markdown(
+    "<div style='background:linear-gradient(90deg,#1B3A6B,#245888);color:#FFFFFF;"
+    "padding:0.5rem 1rem;border-radius:8px;font-size:14px;margin-bottom:0.8rem'>"
+    "🇸🇬 <strong>Singapore Landscape Only</strong> — "
+    "Rankings are based on patents and publications within the Singapore research ecosystem, "
+    "2020–2025. Covers patents &amp; publications only — grants and individual researcher/PI-level "
+    "data are not available in this dataset."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
 
 # -----------------------------
 # Snowflake connection
